@@ -93,11 +93,12 @@ class TransNetPredictor:
         predictions_single = []
         predictions_all = []
 
-        with torch.no_grad():
+        all_tensor = torch.from_numpy(padded_inputs).unsqueeze(0).to(self.device)
+
+        with torch.inference_mode():
             ptr = 0
             while ptr + 100 <= len(padded_inputs):
-                batch = padded_inputs[ptr : ptr + 100]
-                input_tensor = torch.from_numpy(batch[np.newaxis]).to(self.device)
+                input_tensor = all_tensor[:, ptr : ptr + 100]
 
                 single_frame_pred, all_frame_pred = self._model(input_tensor)
 

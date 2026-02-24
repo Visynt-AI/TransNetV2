@@ -41,9 +41,11 @@ class Config:
         )
 
     def get_device(self) -> str:
-        if self.USE_GPU:
-            import torch
+        import torch
 
+        if self.USE_GPU:
             if torch.cuda.is_available():
                 return "cuda"
+            if torch.backends.mps.is_available():
+                return "mps"
         return "cpu"
