@@ -1,8 +1,11 @@
 import json
 import logging
+import math
 import os
 import tempfile
 import uuid
+from concurrent.futures import ProcessPoolExecutor
+from dataclasses import asdict
 from typing import Any, Dict, Optional
 
 import pika
@@ -13,6 +16,14 @@ from .predictor import TransNetPredictor
 from .s3_client import S3Client
 
 logger = logging.getLogger(__name__)
+
+
+def _upload_preview_frame(
+    config_data: dict[str, Any], local_path: str, s3_key: str
+) -> str:
+    config = Config(**config_data)
+    s3_client = S3Client(config)
+    return s3_client.upload_file(local_path, s3_key)
 
 
 class TransNetWorker:
@@ -41,6 +52,182 @@ class TransNetWorker:
             self.connection.close()
             logger.info("Disconnected from RabbitMQ")
 
+    @staticmethod
+    def _probe_video_duration(video_path: str) -> float:
+        import ffmpeg
+
+        probe = ffmpeg.probe(video_path)
+        video_stream = next(
+            stream for stream in probe["streams"] if stream["codec_type"] == "video"
+        )
+        duration = video_stream.get("duration") or probe["format"].get("duration")
+        if duration is None:
+            raise RuntimeError("Unable to determine video duration")
+        return float(duration)
+
+    @staticmethod
+    def _build_scene_sampling_plan(
+        scenes: list[list[int]],
+        frame_count: int,
+        duration_seconds: float,
+        max_interval_seconds: float,
+    ) -> list[dict[str, Any]]:
+        if frame_count <= 0 or duration_seconds <= 0:
+            return []
+
+        average_fps = frame_count / duration_seconds
+        max_frames_per_sample = max(1, math.ceil(average_fps * max_interval_seconds))
+        scene_previews = []
+
+        for scene_index, (start_frame, end_frame) in enumerate(scenes):
+            scene_frame_count = end_frame - start_frame + 1
+            sample_count = max(1, math.ceil(scene_frame_count / max_frames_per_sample))
+            sampled_frames = []
+
+            for sample_index in range(sample_count):
+                segment_start = sample_index * scene_frame_count / sample_count
+                segment_end = (sample_index + 1) * scene_frame_count / sample_count
+                middle_offset = int((segment_start + segment_end - 1) / 2)
+                frame_id = start_frame + middle_offset
+                frame_id = min(max(frame_id, start_frame), end_frame)
+                sampled_frames.append(
+                    {
+                        "sample_index": sample_index,
+                        "frame_id": frame_id,
+                    }
+                )
+
+            scene_previews.append(
+                {
+                    "scene_index": scene_index,
+                    "start_frame": start_frame,
+                    "end_frame": end_frame,
+                    "sample_count": sample_count,
+                    "sampled_frames": sampled_frames,
+                }
+            )
+
+        return scene_previews
+
+    def _upload_scene_preview_frames(
+        self, video_path: str, task_id: str, scene_previews: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        uploaded_scenes = []
+        config_data = asdict(self.config)
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            requested_frame_ids = [
+                sampled_frame["frame_id"]
+                for scene_preview in scene_previews
+                for sampled_frame in scene_preview["sampled_frames"]
+            ]
+            extracted_frame_paths = self.predictor.extract_frame_images(
+                video_path, requested_frame_ids, tmp_dir
+            )
+
+            upload_jobs = []
+            for scene_preview in scene_previews:
+                for sampled_frame in scene_preview["sampled_frames"]:
+                    frame_id = sampled_frame["frame_id"]
+                    local_frame_path = extracted_frame_paths[frame_id]
+                    frame_key = (
+                        f"{self.config.FRAME_IMAGE_PREFIX}{task_id}/{frame_id}.png"
+                    )
+                    upload_jobs.append((frame_id, local_frame_path, frame_key))
+
+            max_workers = 10
+            if max_workers > 0:
+                with ProcessPoolExecutor(max_workers=max_workers) as executor:
+                    future_map = {
+                        executor.submit(
+                            _upload_preview_frame,
+                            config_data,
+                            local_frame_path,
+                            frame_key,
+                        ): (frame_id, frame_key)
+                        for frame_id, local_frame_path, frame_key in upload_jobs
+                    }
+                    uploaded_frame_keys = {
+                        future_map[future][0]: future_map[future][1]
+                        for future in future_map
+                    }
+                    for future in future_map:
+                        future.result()
+            else:
+                uploaded_frame_keys = {}
+
+            for scene_preview in scene_previews:
+                uploaded_frames = []
+                for sampled_frame in scene_preview["sampled_frames"]:
+                    frame_id = sampled_frame["frame_id"]
+                    uploaded_frames.append(
+                        {
+                            "sample_index": sampled_frame["sample_index"],
+                            "frame_id": frame_id,
+                            "image_key": uploaded_frame_keys[frame_id],
+                        }
+                    )
+
+                uploaded_scenes.append(
+                    {
+                        "scene_index": scene_preview["scene_index"],
+                        "start_frame": scene_preview["start_frame"],
+                        "end_frame": scene_preview["end_frame"],
+                        "sample_count": scene_preview["sample_count"],
+                        "sampled_frames": uploaded_frames,
+                    }
+                )
+
+        return uploaded_scenes
+
+    def _process_video(
+        self,
+        task_id: str,
+        s3_key: str,
+        local_video_path: str,
+        scene_threshold: float,
+        max_scene_sample_interval_seconds: float,
+    ) -> Dict[str, Any]:
+        logger.info(f"[{task_id}] Processing video...")
+        result = self.predictor.predict_video(
+            local_video_path,
+            threshold=scene_threshold,
+        )
+
+        video_duration_seconds = self._probe_video_duration(local_video_path)
+        scene_previews = self._build_scene_sampling_plan(
+            result.scenes,
+            result.frame_count,
+            video_duration_seconds,
+            max_scene_sample_interval_seconds,
+        )
+        uploaded_scene_previews = self._upload_scene_preview_frames(
+            local_video_path,
+            task_id,
+            scene_previews,
+        )
+
+        result_data = {
+            "task_id": task_id,
+            "s3_key": s3_key,
+            "frame_count": result.frame_count,
+            "scenes": result.scenes,
+            "single_frame_predictions": result.single_frame_predictions,
+            "all_frame_predictions": result.all_frame_predictions,
+            "scene_threshold": scene_threshold,
+            "max_scene_sample_interval_seconds": max_scene_sample_interval_seconds,
+            "scene_preview_frames": uploaded_scene_previews,
+        }
+
+        result_key = f"{self.config.RESULT_PREFIX}{task_id}/result.json"
+
+        result_data["result_key"] = result_key
+
+        self.s3_client.upload_json(result_data, result_key)
+        logger.info(f"[{task_id}] Uploaded result to {result_key}")
+
+        return result_data
+
     def process_message(self, ch: BlockingChannel, method, properties, body: bytes):
         task_id = str(uuid.uuid4())
         local_video_path = None
@@ -54,38 +241,25 @@ class TransNetWorker:
                 raise ValueError("Missing 's3_key' in message")
 
             task_id = message.get("task_id", task_id)
+            scene_threshold = float(message.get("scene_threshold", 0.5))
+            max_scene_sample_interval_seconds = float(
+                message.get("max_scene_sample_interval_seconds", 5.0)
+            )
+            if not 0 < scene_threshold < 1:
+                raise ValueError("'scene_threshold' must be between 0 and 1")
+            if max_scene_sample_interval_seconds <= 0:
+                raise ValueError(
+                    "'max_scene_sample_interval_seconds' must be greater than 0"
+                )
 
             local_video_path = self.s3_client.download_video(s3_key)
-
-            logger.info(f"[{task_id}] Processing video...")
-            result, visualization = self.predictor.predict_video_with_visualization(
-                local_video_path
+            self._process_video(
+                task_id,
+                s3_key,
+                local_video_path,
+                scene_threshold,
+                max_scene_sample_interval_seconds,
             )
-
-            result_data = {
-                "task_id": task_id,
-                "s3_key": s3_key,
-                "frame_count": result.frame_count,
-                "scenes": result.scenes,
-                "single_frame_predictions": result.single_frame_predictions,
-                "all_frame_predictions": result.all_frame_predictions,
-            }
-
-            result_key = f"{self.config.RESULT_PREFIX}{task_id}/result.json"
-            self.s3_client.upload_json(result_data, result_key)
-            logger.info(f"[{task_id}] Uploaded result to {result_key}")
-
-            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-                visualization.save(tmp.name, "PNG")
-                frame_image_key = (
-                    f"{self.config.FRAME_IMAGE_PREFIX}{task_id}/visualization.png"
-                )
-                self.s3_client.upload_file(tmp.name, frame_image_key)
-                os.unlink(tmp.name)
-                logger.info(f"[{task_id}] Uploaded visualization to {frame_image_key}")
-
-            result_data["result_key"] = result_key
-            result_data["visualization_key"] = frame_image_key
 
             ch.basic_ack(delivery_tag=method.delivery_tag)
             logger.info(f"[{task_id}] Task completed successfully")
@@ -132,30 +306,27 @@ class TransNetWorker:
 
         if not s3_key:
             raise ValueError("Missing 's3_key' in message")
+        scene_threshold = float(message.get("scene_threshold", 0.5))
+        max_scene_sample_interval_seconds = float(
+            message.get("max_scene_sample_interval_seconds", 5.0)
+        )
+        if not 0 < scene_threshold < 1:
+            raise ValueError("'scene_threshold' must be between 0 and 1")
+        if max_scene_sample_interval_seconds <= 0:
+            raise ValueError(
+                "'max_scene_sample_interval_seconds' must be greater than 0"
+            )
 
         local_video_path = self.s3_client.download_video(s3_key)
 
         try:
-            logger.info(f"[{task_id}] Processing video...")
-            result, visualization = self.predictor.predict_video_with_visualization(
-                local_video_path
+            return self._process_video(
+                task_id,
+                s3_key,
+                local_video_path,
+                scene_threshold,
+                max_scene_sample_interval_seconds,
             )
-
-            result_data = {
-                "task_id": task_id,
-                "s3_key": s3_key,
-                "frame_count": result.frame_count,
-                "scenes": result.scenes,
-                "single_frame_predictions": result.single_frame_predictions,
-                "all_frame_predictions": result.all_frame_predictions,
-            }
-
-            result_key = f"{self.config.RESULT_PREFIX}{task_id}/result.json"
-            self.s3_client.upload_json(result_data, result_key)
-
-            result_data["result_key"] = result_key
-
-            return result_data
 
         finally:
             if os.path.exists(local_video_path):

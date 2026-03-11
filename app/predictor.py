@@ -1,4 +1,6 @@
+import glob
 import logging
+import os
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
@@ -190,10 +192,12 @@ class TransNetPredictor:
 
         return img
 
-    def predict_video(self, video_path: str) -> PredictionResult:
+    def predict_video(
+        self, video_path: str, threshold: float = 0.5
+    ) -> PredictionResult:
         frames = self.extract_frames(video_path)
         single_frame_pred, all_frame_pred = self.predict_frames(frames)
-        scenes = self.predictions_to_scenes(single_frame_pred)
+        scenes = self.predictions_to_scenes(single_frame_pred, threshold=threshold)
 
         return PredictionResult(
             scenes=scenes.tolist(),
@@ -203,11 +207,11 @@ class TransNetPredictor:
         )
 
     def predict_video_with_visualization(
-        self, video_path: str
+        self, video_path: str, threshold: float = 0.5
     ) -> Tuple[PredictionResult, Image.Image]:
         frames = self.extract_frames(video_path)
         single_frame_pred, all_frame_pred = self.predict_frames(frames)
-        scenes = self.predictions_to_scenes(single_frame_pred)
+        scenes = self.predictions_to_scenes(single_frame_pred, threshold=threshold)
 
         visualization = self.visualize_predictions(
             frames, single_frame_pred, all_frame_pred
@@ -221,3 +225,58 @@ class TransNetPredictor:
         )
 
         return result, visualization
+
+    def extract_frame_image(
+        self, video_path: str, frame_index: int, output_path: str
+    ) -> None:
+        extracted_frames = self.extract_frame_images(
+            video_path, [frame_index], os.path.dirname(output_path)
+        )
+        extracted_path = extracted_frames.get(frame_index)
+        if extracted_path is None:
+            raise RuntimeError(f"Failed to extract frame {frame_index} from {video_path}")
+        if extracted_path != output_path:
+            os.replace(extracted_path, output_path)
+
+    def extract_frame_images(
+        self, video_path: str, frame_indices: List[int], output_dir: str
+    ) -> dict[int, str]:
+        import ffmpeg
+
+        unique_frame_indices = sorted(set(frame_indices))
+        if not unique_frame_indices:
+            return {}
+
+        os.makedirs(output_dir, exist_ok=True)
+        output_pattern = os.path.join(output_dir, "frame-%06d.png")
+        select_expr = "+".join(
+            f"eq(n,{frame_index})" for frame_index in unique_frame_indices
+        )
+
+        try:
+            (
+                ffmpeg.input(video_path)
+                .filter("select", select_expr)
+                .output(
+                    output_pattern,
+                    format="image2",
+                    vcodec="png",
+                    vsync="vfr",
+                )
+                .overwrite_output()
+                .run(capture_stdout=True, capture_stderr=True)
+            )
+        except ffmpeg.Error as exc:
+            stderr = exc.stderr.decode("utf-8", errors="replace") if exc.stderr else ""
+            raise RuntimeError(
+                f"Failed to extract frames {unique_frame_indices} from {video_path}: {stderr}"
+            ) from exc
+
+        extracted_paths = sorted(glob.glob(os.path.join(output_dir, "frame-*.png")))
+        if len(extracted_paths) != len(unique_frame_indices):
+            raise RuntimeError(
+                "Extracted frame count does not match request: "
+                f"requested={len(unique_frame_indices)} extracted={len(extracted_paths)}"
+            )
+
+        return dict(zip(unique_frame_indices, extracted_paths))
