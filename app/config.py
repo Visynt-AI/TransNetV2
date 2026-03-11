@@ -2,6 +2,8 @@ import os
 from dataclasses import dataclass
 from typing import Optional
 
+from dotenv import load_dotenv
+
 
 @dataclass
 class Config:
@@ -20,6 +22,7 @@ class Config:
 
     @classmethod
     def from_env(cls) -> "Config":
+        load_dotenv()
         use_gpu = os.getenv("USE_GPU", "false").lower() in ("true", "1", "yes")
         return cls(
             RABBITMQ_URL=os.getenv(

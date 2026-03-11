@@ -5,6 +5,9 @@ import sys
 
 from dotenv import load_dotenv
 
+from app.config import Config
+from app.worker import TransNetWorker
+
 load_dotenv()
 
 logging.basicConfig(
@@ -17,9 +20,6 @@ logger = logging.getLogger(__name__)
 
 
 def main():
-    from app.config import Config
-    from app.worker import TransNetWorker
-
     config = Config.from_env()
 
     missing_vars = []
@@ -43,10 +43,8 @@ def main():
         )
         sys.exit(1)
 
-    logger.info(f"Starting TransNetV2 Worker")
-    logger.info(f"RabbitMQ URL: {config.RABBITMQ_URL}")
+    logger.info("Starting TransNetV2 Worker")
     logger.info(f"Queue: {config.QUEUE_NAME}")
-    logger.info(f"S3 Bucket: {config.S3_BUCKET}")
     logger.info(f"Device: {config.get_device()}")
 
     worker = TransNetWorker(config)

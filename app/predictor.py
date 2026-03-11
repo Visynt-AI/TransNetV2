@@ -1,12 +1,10 @@
-import os
-import json
 import logging
-import tempfile
-from typing import Tuple, Optional, List, Dict, Any
 from dataclasses import dataclass
+from typing import List, Optional, Tuple
 
 import numpy as np
 import torch
+import torch.nn as nn
 from PIL import Image
 
 logger = logging.getLogger(__name__)
@@ -22,8 +20,9 @@ class PredictionResult:
 
 class TransNetPredictor:
     _instance: Optional["TransNetPredictor"] = None
-    _model = None
-    _device = None
+
+    _model: Optional[nn.Module] = None
+    _device: Optional[str] = None
 
     def __new__(cls, *args, **kwargs):
         if cls._instance is None:
@@ -31,7 +30,9 @@ class TransNetPredictor:
         return cls._instance
 
     def __init__(self, weights_path: str, device: str = "cpu"):
-        if self._model is not None:
+        if self.__class__._model is not None:
+            self.weights_path = weights_path
+            self.device = device
             return
 
         self.weights_path = weights_path
@@ -58,10 +59,10 @@ class TransNetPredictor:
 
         logger.info(f"Extracting frames from {video_path}")
 
-        probe = ffmpeg.probe(video_path)
-        video_info = next(s for s in probe["streams"] if s["codec_type"] == "video")
-        width = int(video_info["width"])
-        height = int(video_info["height"])
+        # probe = ffmpeg.probe(video_path)
+        # video_info = next(s for s in probe["streams"] if s["codec_type"] == "video")
+        # width = int(video_info["width"])
+        # height = int(video_info["height"])
 
         out, _ = (
             ffmpeg.input(video_path)
@@ -125,16 +126,21 @@ class TransNetPredictor:
     ) -> np.ndarray:
         predictions = (predictions > threshold).astype(np.uint8)
 
+        if len(predictions) == 0:
+            return np.empty((0, 2), dtype=np.int32)
+
         scenes = []
         t, t_prev, start = -1, 0, 0
+        last_index = len(predictions) - 1
         for i, t in enumerate(predictions):
             if t_prev == 1 and t == 0:
                 start = i
             if t_prev == 0 and t == 1 and i != 0:
                 scenes.append([start, i])
             t_prev = t
+
         if t == 0:
-            scenes.append([start, i])
+            scenes.append([start, last_index])
 
         if len(scenes) == 0:
             return np.array([[0, len(predictions) - 1]], dtype=np.int32)

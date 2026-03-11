@@ -3,7 +3,7 @@ import logging
 import os
 import tempfile
 import uuid
-from typing import Dict, Any, Optional
+from typing import Any, Dict, Optional
 
 import pika
 from pika.adapters.blocking_connection import BlockingChannel
@@ -24,7 +24,6 @@ class TransNetWorker:
         self.channel: Optional[BlockingChannel] = None
 
     def connect(self):
-        logger.info(f"Connecting to RabbitMQ: {self.config.RABBITMQ_URL}")
         parameters = pika.URLParameters(self.config.RABBITMQ_URL)
         parameters.heartbeat = 600
         parameters.blocked_connection_timeout = 300
@@ -54,8 +53,7 @@ class TransNetWorker:
             if not s3_key:
                 raise ValueError("Missing 's3_key' in message")
 
-            request_id = message.get("task_id", task_id)
-            task_id = request_id
+            task_id = message.get("task_id", task_id)
 
             local_video_path = self.s3_client.download_video(s3_key)
 
@@ -111,6 +109,9 @@ class TransNetWorker:
     def start(self):
         self.connect()
 
+        if self.channel is None:
+            raise OSError("Channel is None")
+
         self.channel.basic_consume(
             queue=self.config.QUEUE_NAME, on_message_callback=self.process_message
         )
@@ -152,16 +153,7 @@ class TransNetWorker:
             result_key = f"{self.config.RESULT_PREFIX}{task_id}/result.json"
             self.s3_client.upload_json(result_data, result_key)
 
-            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-                visualization.save(tmp.name, "PNG")
-                frame_image_key = (
-                    f"{self.config.FRAME_IMAGE_PREFIX}{task_id}/visualization.png"
-                )
-                self.s3_client.upload_file(tmp.name, frame_image_key)
-                os.unlink(tmp.name)
-
             result_data["result_key"] = result_key
-            result_data["visualization_key"] = frame_image_key
 
             return result_data
 

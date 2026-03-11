@@ -1,0 +1,17 @@
+[project]
+name = "transnetv2"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "boto3>=1.18.0",
+    "ffmpeg-python>=0.2.0",
+    "matplotlib>=3.10.8",
+    "numpy>=1.19.0",
+    "pika>=1.2.0",
+    "pillow>=8.0.0",
+    "python-dotenv>=0.19.0",
+    "torch>=1.9.0",
+    "torchvision>=0.10.0",
+]
