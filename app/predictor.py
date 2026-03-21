@@ -1,6 +1,7 @@
 import glob
 import logging
 import os
+import uuid
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
@@ -248,35 +249,50 @@ class TransNetPredictor:
             return {}
 
         os.makedirs(output_dir, exist_ok=True)
-        output_pattern = os.path.join(output_dir, "frame-%06d.png")
-        select_expr = "+".join(
-            f"eq(n,{frame_index})" for frame_index in unique_frame_indices
-        )
+        max_frames_per_batch = 64
+        extracted_frames: dict[int, str] = {}
+        extraction_id = uuid.uuid4().hex
 
-        try:
-            (
-                ffmpeg.input(video_path)
-                .filter("select", select_expr)
-                .output(
-                    output_pattern,
-                    format="image2",
-                    vcodec="png",
-                    vsync="vfr",
+        for batch_start in range(0, len(unique_frame_indices), max_frames_per_batch):
+            batch_indices = unique_frame_indices[
+                batch_start : batch_start + max_frames_per_batch
+            ]
+            batch_prefix = f"frame-{extraction_id}-{batch_start:06d}"
+            output_pattern = os.path.join(output_dir, f"{batch_prefix}-%06d.png")
+            select_expr = "+".join(
+                f"eq(n,{frame_index})" for frame_index in batch_indices
+            )
+
+            try:
+                (
+                    ffmpeg.input(video_path)
+                    .filter("select", select_expr)
+                    .output(
+                        output_pattern,
+                        format="image2",
+                        vcodec="png",
+                        fps_mode="vfr",
+                    )
+                    .overwrite_output()
+                    .run(capture_stdout=True, capture_stderr=True)
                 )
-                .overwrite_output()
-                .run(capture_stdout=True, capture_stderr=True)
-            )
-        except ffmpeg.Error as exc:
-            stderr = exc.stderr.decode("utf-8", errors="replace") if exc.stderr else ""
-            raise RuntimeError(
-                f"Failed to extract frames {unique_frame_indices} from {video_path}: {stderr}"
-            ) from exc
+            except ffmpeg.Error as exc:
+                stderr = (
+                    exc.stderr.decode("utf-8", errors="replace") if exc.stderr else ""
+                )
+                raise RuntimeError(
+                    f"Failed to extract frames {batch_indices} from {video_path}: {stderr}"
+                ) from exc
 
-        extracted_paths = sorted(glob.glob(os.path.join(output_dir, "frame-*.png")))
-        if len(extracted_paths) != len(unique_frame_indices):
-            raise RuntimeError(
-                "Extracted frame count does not match request: "
-                f"requested={len(unique_frame_indices)} extracted={len(extracted_paths)}"
+            extracted_paths = sorted(
+                glob.glob(os.path.join(output_dir, f"{batch_prefix}-*.png"))
             )
+            if len(extracted_paths) != len(batch_indices):
+                raise RuntimeError(
+                    "Extracted frame count does not match request: "
+                    f"requested={len(batch_indices)} extracted={len(extracted_paths)}"
+                )
 
-        return dict(zip(unique_frame_indices, extracted_paths))
+            extracted_frames.update(dict(zip(batch_indices, extracted_paths)))
+
+        return extracted_frames

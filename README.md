@@ -1,103 +1,164 @@
 # TransNetV2 RabbitMQ Worker
 
-基于 [TransNet V2](https://arxiv.org/abs/2008.04838) 的视频镜头边界检测服务，封装为 RabbitMQ 消费者。
+基于 [TransNet V2](https://arxiv.org/abs/2008.04838) 的视频镜头边界检测服务，封装成一个消费 RabbitMQ 队列任务的 worker。任务视频从 S3 下载，处理结果和抽帧图片再上传回 S3。
 
 ## 功能
 
 - 消费 RabbitMQ 队列中的视频处理任务
-- 从 S3 下载视频文件
-- 使用 PyTorch 版 TransNetV2 进行镜头边界检测
-- 将结果上传到 S3
-- 提供本地结果分析脚本
+- 从 S3 兼容存储下载视频
+- 使用 PyTorch 版 TransNetV2 做镜头切分
+- 将结果 JSON 和预览帧上传到 S3
+- 提供结果可视化脚本
 
 ## 项目结构
 
 ```text
 .
-├── app/
-│   ├── __init__.py
-│   ├── config.py              # 环境变量配置
-│   ├── predictor.py           # 推理封装
-│   ├── s3_client.py           # S3 操作
-│   └── worker.py              # RabbitMQ 消费者
-├── inference_pytorch/
-│   ├── __init__.py
-│   └── transnetv2_pytorch.py  # TransNetV2 模型
-├── scripts/
-│   └── plot_result.py         # 结果可视化脚本
-├── weights/
-│   └── transnetv2-pytorch-weights.pth
-├── main.py
-├── start_worker.sh
-├── pyproject.toml
-├── uv.lock
-├── requirements.txt
-├── .env.example
-└── README.md
+|-- app/
+|   |-- config.py
+|   |-- predictor.py
+|   |-- s3_client.py
+|   `-- worker.py
+|-- inference_pytorch/
+|   `-- transnetv2_pytorch.py
+|-- scripts/
+|   `-- plot_result.py
+|-- weights/
+|-- docker-compose.yml
+|-- Dockerfile
+|-- main.py
+`-- README.md
 ```
 
 ## 环境变量
 
-| 变量名 | 说明 | 默认值 |
-|--------|------|--------|
-| `RABBITMQ_URL` | RabbitMQ 连接 URL | `amqp://guest:guest@localhost:5672/` |
-| `QUEUE_NAME` | 消费队列名称 | `transnet_tasks` |
-| `S3_ENDPOINT_URL` | S3 端点 (MinIO/其他) | `` |
-| `S3_ACCESS_KEY` | S3 Access Key | - |
-| `S3_SECRET_KEY` | S3 Secret Key | - |
-| `S3_BUCKET` | S3 Bucket 名称 | - |
-| `S3_REGION` | S3 区域 | `us-east-1` |
-| `USE_GPU` | 是否使用 GPU | `false` |
-| `CUDA_VISIBLE_DEVICES` | GPU 设备 ID | - |
-| `WEIGHTS_PATH` | 模型权重路径 | `./weights/transnetv2-pytorch-weights.pth` |
-| `RESULT_PREFIX` | 结果文件前缀 | `results/` |
-| `FRAME_IMAGE_PREFIX` | 帧图片前缀 | `frames/` |
+| 变量 | 说明 | 默认值 |
+| --- | --- | --- |
+| `RABBITMQ_URL` | RabbitMQ 连接地址 | `amqp://guest:guest@localhost:5672/` |
+| `QUEUE_NAME` | 消费队列名 | `transnet_tasks` |
+| `S3_ENDPOINT_URL` | S3 兼容端点 | 空 |
+| `S3_ACCESS_KEY` | S3 Access Key | 空 |
+| `S3_SECRET_KEY` | S3 Secret Key | 空 |
+| `S3_BUCKET` | Bucket 名称 | 空 |
+| `S3_REGION` | 区域 | `us-east-1` |
+| `USE_GPU` | 是否启用 GPU | `false` |
+| `CUDA_VISIBLE_DEVICES` | GPU 设备 ID | 空 |
+| `WEIGHTS_PATH` | 权重文件路径 | `./weights/transnetv2-pytorch-weights.pth` |
+| `RESULT_PREFIX` | 结果前缀 | `results/` |
+| `FRAME_IMAGE_PREFIX` | 抽帧图片前缀 | `frames/` |
 
-## 快速开始
+## 本地运行
 
-### 1. 准备模型权重
-
-将权重文件放到 `weights/transnetv2-pytorch-weights.pth`。
-
-### 2. 配置环境变量
+1. 准备权重文件，放到 `weights/transnetv2-pytorch-weights.pth`
+2. 复制环境变量模板
 
 ```bash
 cp .env.example .env
 ```
 
-按实际环境填写 `.env` 中的 RabbitMQ、S3 和权重路径配置。
-
-### 3. 安装依赖
+3. 安装依赖
 
 ```bash
 uv sync
 ```
 
-### 4. 启动 worker
-
-```bash
-./start_worker.sh
-```
-
-如果不使用启动脚本，也可以直接运行：
+4. 启动 worker
 
 ```bash
 uv run python main.py
 ```
 
-### 5. Docker 运行
+## Docker Compose 部署
+
+仓库现在自带完整编排，包含这些服务：
+
+- `worker`: TransNetV2 消费者
+- `rabbitmq`: 消息队列，管理后台默认暴露在 `15672`
+- `minio`: S3 兼容对象存储，控制台默认暴露在 `9001`
+- `minio-init`: 自动创建 `S3_BUCKET`
+
+### 1. 准备配置
+
+复制模板并按实际环境修改：
+
+```bash
+cp .env.example .env
+```
+
+如果你直接使用仓库里的 `docker-compose.yml`，`.env` 建议至少确认这些值：
+
+```env
+S3_ACCESS_KEY=minioadmin
+S3_SECRET_KEY=minioadmin
+S3_BUCKET=videos
+QUEUE_NAME=transnet_tasks
+```
+
+`docker-compose.yml` 会自动把容器内地址改成：
+
+- RabbitMQ: `amqp://guest:guest@rabbitmq:5672/`
+- MinIO: `http://minio:9000`
+
+所以 `.env` 中的 `localhost` 配置不会影响容器间通信。
+
+### 2. 准备模型权重
+
+把模型权重放到：
+
+```text
+weights/transnetv2-pytorch-weights.pth
+```
+
+Compose 会把这个目录只读挂载到容器内的 `/app/weights`。
+
+### 3. 启动
+
+```bash
+docker compose up -d --build
+```
+
+### 4. 查看状态
+
+```bash
+docker compose ps
+docker compose logs -f worker
+```
+
+### 5. 访问配套服务
+
+- RabbitMQ 管理页: `http://localhost:15672`
+- MinIO API: `http://localhost:9000`
+- MinIO Console: `http://localhost:9001`
+
+### 6. 停止
+
+```bash
+docker compose down
+```
+
+如果需要连同持久化数据一起清理：
+
+```bash
+docker compose down -v
+```
+
+## 单容器运行
+
+如果 RabbitMQ 和 S3 已经由外部环境提供，也可以只启动 worker：
 
 ```bash
 docker build -t transnetv2-worker .
 docker run -d \
   --env-file .env \
-  -v $(pwd)/weights:/app/weights \
+  -v $(pwd)/weights:/app/weights:ro \
   transnetv2-worker
 ```
 
+这种方式下，需要确保 `.env` 中的 `RABBITMQ_URL` 和 `S3_ENDPOINT_URL` 指向真实可达的外部服务，而不是容器内默认地址。
+
 ## 消息格式
 
-### 输入消息
+输入消息：
 
 ```json
 {
@@ -108,18 +169,20 @@ docker run -d \
 }
 ```
 
-说明：
+字段说明：
 
-- `task_id` 可选，不传时由 worker 自动生成
-- `s3_key` 必填，指向待处理视频
-- `scene_threshold` 可选，镜头切分阈值，默认 `0.5`
-- `max_scene_sample_interval_seconds` 可选，同一镜头内抽图的最大时间间隔，默认 `5.0`
+- `task_id`: 可选，不传时自动生成
+- `s3_key`: 必填，待处理视频在 S3 中的 key
+- `scene_threshold`: 可选，镜头切分阈值，默认 `0.5`
+- `max_scene_sample_interval_seconds`: 可选，同一镜头内最大抽样间隔秒数，默认 `5.0`
 
-### 输出结果
+输出结果会上传到：
 
-worker 成功处理后会将结果上传到：
+```text
+results/{task_id}/result.json
+```
 
-`results/{task_id}/result.json`
+示例：
 
 ```json
 {
@@ -141,63 +204,16 @@ worker 成功处理后会将结果上传到：
         {
           "sample_index": 0,
           "frame_id": 112,
-          "image_key": "frames/xxx/112.png"
-        },
-        {
-          "sample_index": 1,
-          "frame_id": 337,
-          "image_key": "frames/xxx/337.png"
+          "image_key": "s3://videos/frames/xxx/112.png"
         }
       ]
     }
-  ]
+  ],
+  "result_key": "results/xxx/result.json"
 }
 ```
 
-说明：
-
-- `scenes` 是按帧号表示的镜头区间
-- `single_frame_predictions` 是逐帧切点分数
-- `all_frame_predictions` 是逐帧转场区域分数
-- `scene_threshold` 是本次任务实际使用的切分阈值
-- `max_scene_sample_interval_seconds` 是本次任务实际使用的镜头抽图最大间隔
-- `scene_preview_frames` 是每个镜头对应的抽图结果
-- `frame_id` 会直接作为上传图片文件名的一部分，例如 `frames/{task_id}/{frame_id}.png`
-- `image_key` 是上传到 S3 的对象 key
-
-`TransNetWorker.run_once()` 的返回值还会包含：
-
-```json
-{
-  "result_key": "results/{task_id}/result.json"
-}
-```
-
-当前主消费链路默认只上传 `result.json`，不再上传可视化 PNG。
-
-## 镜头抽图规则
-
-worker 会为每个分析出的镜头自动抽取代表帧并上传到 S3。
-
-规则如下：
-
-- 单个镜头内相邻采样点的最大时间间隔不超过 `max_scene_sample_interval_seconds`
-- 采样数量按 `ceil(镜头时长 / 最大间隔)` 计算
-- 然后把整个镜头平均分成这么多段
-- 每一段取中间帧作为代表图
-- 需要上传的帧会先批量提取，再并发上传到 S3
-
-例如：
-
-- 镜头时长 `4s`，默认参数下抽 `1` 张
-- 镜头时长 `10s`，默认参数下抽 `2` 张
-- 镜头时长 `15s`，默认参数下抽 `3` 张
-
-## 结果分析
-
-项目提供了 [scripts/plot_result.py](./scripts/plot_result.py) 用于分析 `result.json`。
-
-示例：
+## 结果可视化
 
 ```bash
 uv run python scripts/plot_result.py \
@@ -207,21 +223,14 @@ uv run python scripts/plot_result.py \
 
 可选参数：
 
-- `--threshold 0.5` 绘制参考阈值线
-- `--zoom-start 300 --zoom-end 500` 输出局部放大图
-
-输出内容包括：
-
-- `single_frame_predictions` 折线
-- `all_frame_predictions` 折线
-- scene 边界标记
-- scene 区间可视化
+- `--threshold 0.5`
+- `--zoom-start 300 --zoom-end 500`
 
 ## ACK 机制
 
 - 处理成功: `basic_ack`
 - 消息格式错误: `basic_nack(requeue=False)`
-- 处理异常: `basic_nack(requeue=True)` 重新入队
+- 处理异常: `basic_nack(requeue=True)`
 
 ## 引用
 

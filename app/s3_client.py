@@ -37,7 +37,8 @@ class S3Client:
         if not ext:
             ext = ".mp4"
 
-        fd, local_path = tempfile.mkstemp(suffix=ext)
+        os.makedirs(self.config.TEMP_DIR, exist_ok=True)
+        fd, local_path = tempfile.mkstemp(suffix=ext, dir=self.config.TEMP_DIR)
         os.close(fd)
 
         try:

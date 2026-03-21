@@ -2,9 +2,8 @@ import json
 import logging
 import math
 import os
-import tempfile
 import uuid
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from typing import Any, Dict, Optional
 
@@ -114,17 +113,18 @@ class TransNetWorker:
     ) -> list[dict[str, Any]]:
         uploaded_scenes = []
         config_data = asdict(self.config)
+        os.makedirs(self.config.TEMP_DIR, exist_ok=True)
 
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            requested_frame_ids = [
-                sampled_frame["frame_id"]
-                for scene_preview in scene_previews
-                for sampled_frame in scene_preview["sampled_frames"]
-            ]
-            extracted_frame_paths = self.predictor.extract_frame_images(
-                video_path, requested_frame_ids, tmp_dir
-            )
+        requested_frame_ids = [
+            sampled_frame["frame_id"]
+            for scene_preview in scene_previews
+            for sampled_frame in scene_preview["sampled_frames"]
+        ]
+        extracted_frame_paths = self.predictor.extract_frame_images(
+            video_path, requested_frame_ids, self.config.TEMP_DIR
+        )
 
+        try:
             upload_jobs = []
             for scene_preview in scene_previews:
                 for sampled_frame in scene_preview["sampled_frames"]:
@@ -137,7 +137,7 @@ class TransNetWorker:
 
             max_workers = 10
             if max_workers > 0:
-                with ProcessPoolExecutor(max_workers=max_workers) as executor:
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
                     future_map = {
                         executor.submit(
                             _upload_preview_frame,
@@ -177,6 +177,10 @@ class TransNetWorker:
                         "sampled_frames": uploaded_frames,
                     }
                 )
+        finally:
+            for local_frame_path in extracted_frame_paths.values():
+                if os.path.exists(local_frame_path):
+                    os.unlink(local_frame_path)
 
         return uploaded_scenes
 

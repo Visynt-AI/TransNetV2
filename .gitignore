@@ -33,6 +33,8 @@ weights/*.pth
 .DS_Store
 .idea/
 .vscode/
+.uv-cache/
+logs/
 *.swp
 *.swo
 *~
