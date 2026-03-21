@@ -36,6 +36,7 @@
 | --- | --- | --- |
 | `RABBITMQ_URL` | RabbitMQ 连接地址 | `amqp://guest:guest@localhost:5672/` |
 | `QUEUE_NAME` | 消费队列名 | `transnet_tasks` |
+| `DONE_QUEUE_NAME` | 结果完成队列名 | `transnet_tasks_done` |
 | `S3_ENDPOINT_URL` | S3 兼容端点 | 空 |
 | `S3_ACCESS_KEY` | S3 Access Key | 空 |
 | `S3_SECRET_KEY` | S3 Secret Key | 空 |
@@ -92,6 +93,7 @@ S3_ACCESS_KEY=minioadmin
 S3_SECRET_KEY=minioadmin
 S3_BUCKET=videos
 QUEUE_NAME=transnet_tasks
+DONE_QUEUE_NAME=transnet_tasks_done
 ```
 
 `docker-compose.yml` 会自动把容器内地址改成：
@@ -180,6 +182,12 @@ docker run -d \
 
 ```text
 results/{task_id}/result.json
+```
+
+任务处理成功后，还会将与 `result.json` 内容完全一致的 JSON 消息发送到 RabbitMQ 结果队列，默认值为：
+
+```text
+transnet_tasks_done
 ```
 
 示例：

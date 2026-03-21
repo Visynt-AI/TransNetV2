@@ -45,6 +45,7 @@ def main():
 
     logger.info("Starting TransNetV2 Worker")
     logger.info(f"Queue: {config.QUEUE_NAME}")
+    logger.info(f"Done queue: {config.DONE_QUEUE_NAME}")
     logger.info(f"Device: {config.get_device()}")
 
     worker = TransNetWorker(config)

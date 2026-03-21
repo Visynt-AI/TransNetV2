@@ -19,6 +19,7 @@ def _normalize_s3_prefix(value: str, default: str) -> str:
 class Config:
     RABBITMQ_URL: str
     QUEUE_NAME: str
+    DONE_QUEUE_NAME: str
     S3_ENDPOINT_URL: str
     S3_ACCESS_KEY: str
     S3_SECRET_KEY: str
@@ -45,6 +46,7 @@ class Config:
                 "RABBITMQ_URL", "amqp://guest:guest@localhost:5672/"
             ),
             QUEUE_NAME=os.getenv("QUEUE_NAME", "transnet_tasks"),
+            DONE_QUEUE_NAME=os.getenv("DONE_QUEUE_NAME", "transnet_tasks_done"),
             S3_ENDPOINT_URL=os.getenv("S3_ENDPOINT_URL", ""),
             S3_ACCESS_KEY=os.getenv("S3_ACCESS_KEY", ""),
             S3_SECRET_KEY=os.getenv("S3_SECRET_KEY", ""),

@@ -42,9 +42,27 @@ class TransNetWorker:
         self.channel = self.connection.channel()
 
         self.channel.queue_declare(queue=self.config.QUEUE_NAME, durable=True)
+        self.channel.queue_declare(queue=self.config.DONE_QUEUE_NAME, durable=True)
         self.channel.basic_qos(prefetch_count=1)
 
         logger.info("Connected to RabbitMQ")
+
+    def _publish_result_message(self, task_id: str, result_payload: bytes):
+        if self.channel is None or self.channel.is_closed:
+            raise RuntimeError("RabbitMQ channel is not available for result publish")
+
+        self.channel.basic_publish(
+            exchange="",
+            routing_key=self.config.DONE_QUEUE_NAME,
+            body=result_payload,
+            properties=pika.BasicProperties(
+                content_type="application/json",
+                delivery_mode=2,
+            ),
+        )
+        logger.info(
+            f"[{task_id}] Published result to queue '{self.config.DONE_QUEUE_NAME}'"
+        )
 
     def disconnect(self):
         if self.connection and self.connection.is_open:
@@ -191,6 +209,7 @@ class TransNetWorker:
         local_video_path: str,
         scene_threshold: float,
         max_scene_sample_interval_seconds: float,
+        publish_done_queue: bool = False,
     ) -> Dict[str, Any]:
         logger.info(f"[{task_id}] Processing video...")
         result = self.predictor.predict_video(
@@ -227,8 +246,18 @@ class TransNetWorker:
 
         result_data["result_key"] = result_key
 
-        self.s3_client.upload_json(result_data, result_key)
+        result_payload = json.dumps(result_data, ensure_ascii=False, indent=2).encode(
+            "utf-8"
+        )
+        self.s3_client.upload_bytes(
+            result_payload,
+            result_key,
+            content_type="application/json",
+        )
         logger.info(f"[{task_id}] Uploaded result to {result_key}")
+
+        if publish_done_queue:
+            self._publish_result_message(task_id, result_payload)
 
         return result_data
 
@@ -263,6 +292,7 @@ class TransNetWorker:
                 local_video_path,
                 scene_threshold,
                 max_scene_sample_interval_seconds,
+                publish_done_queue=True,
             )
 
             ch.basic_ack(delivery_tag=method.delivery_tag)
