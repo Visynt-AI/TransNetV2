@@ -197,9 +197,8 @@ transnet_tasks_done
   "task_id": "xxx",
   "s3_key": "videos/example.mp4",
   "frame_count": 1500,
+  "fps": 25.0,
   "scenes": [[0, 100], [101, 250]],
-  "single_frame_predictions": [0.1, 0.2, 0.9],
-  "all_frame_predictions": [0.1, 0.2, 0.8],
   "scene_threshold": 0.5,
   "max_scene_sample_interval_seconds": 5.0,
   "scene_preview_frames": [

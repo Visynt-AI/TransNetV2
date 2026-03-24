@@ -3,6 +3,7 @@ import logging
 import math
 import os
 import uuid
+from fractions import Fraction
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from typing import Any, Dict, Optional
@@ -70,7 +71,7 @@ class TransNetWorker:
             logger.info("Disconnected from RabbitMQ")
 
     @staticmethod
-    def _probe_video_duration(video_path: str) -> float:
+    def _probe_video_metadata(video_path: str, frame_count: int) -> tuple[float, float]:
         import ffmpeg
 
         probe = ffmpeg.probe(video_path)
@@ -80,7 +81,24 @@ class TransNetWorker:
         duration = video_stream.get("duration") or probe["format"].get("duration")
         if duration is None:
             raise RuntimeError("Unable to determine video duration")
-        return float(duration)
+        duration_seconds = float(duration)
+
+        fps = 0.0
+        for rate_key in ("avg_frame_rate", "r_frame_rate"):
+            raw_rate = video_stream.get(rate_key)
+            if not raw_rate:
+                continue
+            try:
+                fps = float(Fraction(raw_rate))
+            except (ValueError, ZeroDivisionError):
+                continue
+            if fps > 0:
+                break
+
+        if fps <= 0 and frame_count > 0 and duration_seconds > 0:
+            fps = frame_count / duration_seconds
+
+        return duration_seconds, fps
 
     @staticmethod
     def _build_scene_sampling_plan(
@@ -217,7 +235,9 @@ class TransNetWorker:
             threshold=scene_threshold,
         )
 
-        video_duration_seconds = self._probe_video_duration(local_video_path)
+        video_duration_seconds, fps = self._probe_video_metadata(
+            local_video_path, result.frame_count
+        )
         scene_previews = self._build_scene_sampling_plan(
             result.scenes,
             result.frame_count,
@@ -234,9 +254,8 @@ class TransNetWorker:
             "task_id": task_id,
             "s3_key": s3_key,
             "frame_count": result.frame_count,
+            "fps": fps,
             "scenes": result.scenes,
-            "single_frame_predictions": result.single_frame_predictions,
-            "all_frame_predictions": result.all_frame_predictions,
             "scene_threshold": scene_threshold,
             "max_scene_sample_interval_seconds": max_scene_sample_interval_seconds,
             "scene_preview_frames": uploaded_scene_previews,

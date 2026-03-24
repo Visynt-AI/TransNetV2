@@ -16,8 +16,6 @@ logger = logging.getLogger(__name__)
 @dataclass
 class PredictionResult:
     scenes: List[List[int]]
-    single_frame_predictions: List[float]
-    all_frame_predictions: List[float]
     frame_count: int
 
 
@@ -202,8 +200,6 @@ class TransNetPredictor:
 
         return PredictionResult(
             scenes=scenes.tolist(),
-            single_frame_predictions=single_frame_pred.tolist(),
-            all_frame_predictions=all_frame_pred.tolist(),
             frame_count=len(frames),
         )
 
@@ -220,8 +216,6 @@ class TransNetPredictor:
 
         result = PredictionResult(
             scenes=scenes.tolist(),
-            single_frame_predictions=single_frame_pred.tolist(),
-            all_frame_predictions=all_frame_pred.tolist(),
             frame_count=len(frames),
         )
 
