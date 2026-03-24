@@ -75,18 +75,16 @@ def scene_boundaries(scenes: list[list[int]]) -> list[int]:
 
 def extract_scenes(data: dict[str, Any]) -> list[list[int]]:
     scenes = data.get("scenes")
-    if scenes:
+    if isinstance(scenes, list) and scenes:
         return scenes
 
-    scene_previews = data.get("scene_preview_frames", [])
-    extracted_scenes: list[list[int]] = []
-    for scene_preview in scene_previews:
-        start_frame = scene_preview.get("start_frame")
-        end_frame = scene_preview.get("end_frame")
-        if start_frame is None or end_frame is None:
-            continue
-        extracted_scenes.append([int(start_frame), int(end_frame)])
-
+    preview_frames = data.get("scene_preview_frames", [])
+    extracted_scenes = []
+    for scene in preview_frames:
+        start_frame = scene.get("start_frame")
+        end_frame = scene.get("end_frame")
+        if isinstance(start_frame, int) and isinstance(end_frame, int):
+            extracted_scenes.append([start_frame, end_frame])
     return extracted_scenes
 
 
