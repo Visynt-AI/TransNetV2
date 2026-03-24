@@ -255,7 +255,6 @@ class TransNetWorker:
             "s3_key": s3_key,
             "frame_count": result.frame_count,
             "fps": fps,
-            "scenes": result.scenes,
             "scene_threshold": scene_threshold,
             "max_scene_sample_interval_seconds": max_scene_sample_interval_seconds,
             "scene_preview_frames": uploaded_scene_previews,

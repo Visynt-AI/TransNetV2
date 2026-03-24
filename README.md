@@ -198,7 +198,6 @@ transnet_tasks_done
   "s3_key": "videos/example.mp4",
   "frame_count": 1500,
   "fps": 25.0,
-  "scenes": [[0, 100], [101, 250]],
   "scene_threshold": 0.5,
   "max_scene_sample_interval_seconds": 5.0,
   "scene_preview_frames": [

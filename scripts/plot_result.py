@@ -73,6 +73,21 @@ def scene_boundaries(scenes: list[list[int]]) -> list[int]:
     return [scene[0] for scene in scenes[1:]]
 
 
+def extract_scenes(data: dict[str, Any]) -> list[list[int]]:
+    scenes = data.get("scenes")
+    if isinstance(scenes, list) and scenes:
+        return scenes
+
+    preview_frames = data.get("scene_preview_frames", [])
+    extracted_scenes = []
+    for scene in preview_frames:
+        start_frame = scene.get("start_frame")
+        end_frame = scene.get("end_frame")
+        if isinstance(start_frame, int) and isinstance(end_frame, int):
+            extracted_scenes.append([start_frame, end_frame])
+    return extracted_scenes
+
+
 def add_boundaries(ax: plt.Axes, boundaries: list[int]) -> None:
     for boundary in boundaries:
         ax.axvline(boundary, color=SUBTEXT0, linestyle=":", linewidth=0.8, alpha=0.35)
@@ -114,7 +129,7 @@ def plot_series(
 
 def plot_predictions(data: dict[str, Any], output_path: Path, args: argparse.Namespace) -> None:
     frame_count = int(data.get("frame_count", 0))
-    scenes = data.get("scenes", [])
+    scenes = extract_scenes(data)
     single = np.asarray(data.get("single_frame_predictions", []), dtype=float)
     many = np.asarray(data.get("all_frame_predictions", []), dtype=float)
     boundaries = scene_boundaries(scenes)
