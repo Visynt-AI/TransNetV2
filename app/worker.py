@@ -255,7 +255,6 @@ class TransNetWorker:
             "s3_key": s3_key,
             "frame_count": result.frame_count,
             "fps": fps,
-            "scenes": result.scenes,
             "scene_threshold": scene_threshold,
             "max_scene_sample_interval_seconds": max_scene_sample_interval_seconds,
             "scene_preview_frames": uploaded_scene_previews,
@@ -281,7 +280,7 @@ class TransNetWorker:
         return result_data
 
     def process_message(self, ch: BlockingChannel, method, properties, body: bytes):
-        task_id = str(uuid.uuid4())
+        task_id = f"vs-v1-{uuid.uuid4()}"
         local_video_path = None
 
         try:
@@ -292,7 +291,7 @@ class TransNetWorker:
             if not s3_key:
                 raise ValueError("Missing 's3_key' in message")
 
-            task_id = message.get("task_id", task_id)
+            task_id = message.get("task_id") or task_id
             scene_threshold = float(message.get("scene_threshold", 0.5))
             max_scene_sample_interval_seconds = float(
                 message.get("max_scene_sample_interval_seconds", 5.0)
