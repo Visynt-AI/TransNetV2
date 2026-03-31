@@ -7,7 +7,7 @@
 - 消费 RabbitMQ 队列中的视频处理任务
 - 从 S3 兼容存储下载视频
 - 使用 PyTorch 版 TransNetV2 做镜头切分
-- 将结果 JSON 和预览帧上传到 S3
+- 将结果 JSON、预览帧、音频文件以及可提取字幕上传到 S3
 - 提供结果可视化脚本
 
 ## 项目结构
@@ -47,6 +47,9 @@
 | `WEIGHTS_PATH` | 权重文件路径 | `./weights/transnetv2-pytorch-weights.pth` |
 | `RESULT_PREFIX` | 结果前缀 | `results/` |
 | `FRAME_IMAGE_PREFIX` | 抽帧图片前缀 | `frames/` |
+| `AUDIO_PREFIX` | 音频文件前缀 | `audio/` |
+| `SUBTITLE_PREFIX` | 字幕文件前缀 | `subtitles/` |
+| `TEMP_DIR` | 本地临时目录 | `./.tmp` |
 
 ## 本地运行
 
@@ -167,7 +170,9 @@ docker run -d \
   "task_id": "optional-task-uuid",
   "s3_key": "videos/example.mp4",
   "scene_threshold": 0.5,
-  "max_scene_sample_interval_seconds": 5.0
+  "max_scene_sample_interval_seconds": 5.0,
+  "extract_audio": true,
+  "extract_subtitles": true
 }
 ```
 
@@ -177,6 +182,8 @@ docker run -d \
 - `s3_key`: 必填，待处理视频在 S3 中的 key
 - `scene_threshold`: 可选，镜头切分阈值，默认 `0.5`
 - `max_scene_sample_interval_seconds`: 可选，同一镜头内最大抽样间隔秒数，默认 `5.0`
+- `extract_audio`: 可选，是否提取第一个音频流并上传到 S3，默认 `true`
+- `extract_subtitles`: 可选，是否探测并提取可转换的内封字幕流，默认 `true`
 
 输出结果会上传到：
 
@@ -198,8 +205,31 @@ transnet_tasks_done
   "s3_key": "videos/example.mp4",
   "frame_count": 1500,
   "fps": 25.0,
+  "source_container": "mov,mp4,m4a,3gp,3g2,mj2",
+  "source_extension": ".mp4",
   "scene_threshold": 0.5,
   "max_scene_sample_interval_seconds": 5.0,
+  "audio": {
+    "stream_index": 1,
+    "codec_name": "aac",
+    "channels": 2,
+    "sample_rate": 48000,
+    "bit_rate": 128000,
+    "language": "und",
+    "audio_key": "audio/xxx/audio.m4a"
+  },
+  "subtitles": [
+    {
+      "stream_index": 2,
+      "codec_name": "mov_text",
+      "language": "chi",
+      "title": "Simplified Chinese",
+      "default": true,
+      "forced": false,
+      "extractable": true,
+      "subtitle_key": "subtitles/xxx/subtitle-2.srt"
+    }
+  ],
   "scene_preview_frames": [
     {
       "scene_index": 0,
@@ -218,6 +248,13 @@ transnet_tasks_done
   "result_key": "results/xxx/result.json"
 }
 ```
+
+说明：
+
+- 视频推理仍然直接把视频流解码成模型所需低分辨率帧，不会先把整段视频导出成完整帧序列落盘。
+- 音频提取优先使用流拷贝，不重新编码，尽量减少 CPU 和耗时。
+- 字幕会先探测内封字幕流；当前默认提取文本类字幕编码，如 `mov_text`、`subrip`、`ass`、`webvtt`。图片类字幕流会保留元数据，但不会强制转码提取。
+- 输入不只支持 `mp4`。只要当前环境里的 `ffmpeg` 能解封装和解码，`mov`、`mkv`、`avi`、`webm` 等都可以处理；最终支持范围取决于运行时 `ffmpeg` 编译能力。
 
 ## 结果可视化
 

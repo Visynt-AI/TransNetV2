@@ -30,6 +30,8 @@ class Config:
     WEIGHTS_PATH: str
     RESULT_PREFIX: str
     FRAME_IMAGE_PREFIX: str
+    AUDIO_PREFIX: str
+    SUBTITLE_PREFIX: str
     TEMP_DIR: str
 
     @classmethod
@@ -62,6 +64,12 @@ class Config:
             ),
             FRAME_IMAGE_PREFIX=_normalize_s3_prefix(
                 os.getenv("FRAME_IMAGE_PREFIX", "frames/"), "frames/"
+            ),
+            AUDIO_PREFIX=_normalize_s3_prefix(
+                os.getenv("AUDIO_PREFIX", "audio/"), "audio/"
+            ),
+            SUBTITLE_PREFIX=_normalize_s3_prefix(
+                os.getenv("SUBTITLE_PREFIX", "subtitles/"), "subtitles/"
             ),
             TEMP_DIR=os.getenv("TEMP_DIR", "./.tmp"),
         )

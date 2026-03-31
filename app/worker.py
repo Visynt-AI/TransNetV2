@@ -17,6 +17,38 @@ from .s3_client import S3Client
 
 logger = logging.getLogger(__name__)
 
+_TEXT_SUBTITLE_CODECS = {
+    "ass",
+    "mov_text",
+    "srt",
+    "ssa",
+    "subrip",
+    "text",
+    "webvtt",
+}
+
+_AUDIO_STREAM_TARGETS = {
+    "aac": {"ext": ".m4a", "format": "ipod"},
+    "ac3": {"ext": ".ac3", "format": "ac3"},
+    "alac": {"ext": ".m4a", "format": "ipod"},
+    "eac3": {"ext": ".eac3", "format": "eac3"},
+    "flac": {"ext": ".flac", "format": "flac"},
+    "mp3": {"ext": ".mp3", "format": "mp3"},
+    "opus": {"ext": ".ogg", "format": "ogg"},
+    "pcm_s16le": {"ext": ".wav", "format": "wav"},
+    "vorbis": {"ext": ".ogg", "format": "ogg"},
+}
+
+_SUBTITLE_STREAM_TARGETS = {
+    "ass": {"ext": ".ass", "codec": "ass", "format": "ass"},
+    "mov_text": {"ext": ".srt", "codec": "srt", "format": "srt"},
+    "srt": {"ext": ".srt", "codec": "srt", "format": "srt"},
+    "ssa": {"ext": ".ass", "codec": "ass", "format": "ass"},
+    "subrip": {"ext": ".srt", "codec": "srt", "format": "srt"},
+    "text": {"ext": ".srt", "codec": "srt", "format": "srt"},
+    "webvtt": {"ext": ".vtt", "codec": "webvtt", "format": "webvtt"},
+}
+
 
 def _upload_preview_frame(
     config_data: dict[str, Any], local_path: str, s3_key: str
@@ -71,14 +103,31 @@ class TransNetWorker:
             logger.info("Disconnected from RabbitMQ")
 
     @staticmethod
-    def _probe_video_metadata(video_path: str, frame_count: int) -> tuple[float, float]:
-        import ffmpeg
+    def _parse_bool(value: Any, default: bool) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"1", "true", "yes", "on"}:
+                return True
+            if normalized in {"0", "false", "no", "off"}:
+                return False
+        if isinstance(value, (int, float)):
+            return bool(value)
+        raise ValueError(f"Invalid boolean value: {value!r}")
 
-        probe = ffmpeg.probe(video_path)
+    @staticmethod
+    def _probe_video_metadata(
+        probe_data: dict[str, Any], frame_count: int
+    ) -> tuple[float, float]:
         video_stream = next(
-            stream for stream in probe["streams"] if stream["codec_type"] == "video"
+            stream
+            for stream in probe_data["streams"]
+            if stream["codec_type"] == "video"
         )
-        duration = video_stream.get("duration") or probe["format"].get("duration")
+        duration = video_stream.get("duration") or probe_data["format"].get("duration")
         if duration is None:
             raise RuntimeError("Unable to determine video duration")
         duration_seconds = float(duration)
@@ -99,6 +148,131 @@ class TransNetWorker:
             fps = frame_count / duration_seconds
 
         return duration_seconds, fps
+
+    @staticmethod
+    def _probe_media_streams(video_path: str) -> dict[str, Any]:
+        import ffmpeg
+
+        return ffmpeg.probe(video_path)
+
+    @staticmethod
+    def _extract_audio_stream(
+        video_path: str, output_dir: str, task_id: str, probe_data: dict[str, Any]
+    ) -> Optional[dict[str, Any]]:
+        import ffmpeg
+
+        audio_streams = [
+            stream
+            for stream in probe_data.get("streams", [])
+            if stream.get("codec_type") == "audio"
+        ]
+        if not audio_streams:
+            return None
+
+        stream = audio_streams[0]
+        codec_name = (stream.get("codec_name") or "").lower()
+        target = _AUDIO_STREAM_TARGETS.get(
+            codec_name, {"ext": ".mka", "format": "matroska"}
+        )
+        output_path = os.path.join(output_dir, f"{task_id}{target['ext']}")
+
+        try:
+            (
+                ffmpeg.input(video_path)
+                .output(
+                    output_path,
+                    map="0:a:0",
+                    acodec="copy",
+                    format=target["format"],
+                )
+                .overwrite_output()
+                .run(capture_stdout=True, capture_stderr=True, quiet=True)
+            )
+        except ffmpeg.Error as exc:
+            stderr = (
+                exc.stderr.decode("utf-8", errors="replace") if exc.stderr else ""
+            )
+            raise RuntimeError(
+                f"Failed to extract audio stream from {video_path}: {stderr}"
+            ) from exc
+
+        return {
+            "stream_index": stream.get("index"),
+            "codec_name": stream.get("codec_name"),
+            "channels": stream.get("channels"),
+            "sample_rate": int(stream["sample_rate"])
+            if stream.get("sample_rate")
+            else None,
+            "bit_rate": int(stream["bit_rate"]) if stream.get("bit_rate") else None,
+            "language": (stream.get("tags") or {}).get("language"),
+            "local_path": output_path,
+            "file_ext": target["ext"],
+        }
+
+    @staticmethod
+    def _extract_subtitle_streams(
+        video_path: str, output_dir: str, task_id: str, probe_data: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        import ffmpeg
+
+        subtitle_streams = [
+            stream
+            for stream in probe_data.get("streams", [])
+            if stream.get("codec_type") == "subtitle"
+        ]
+
+        extracted_subtitles = []
+        for subtitle_order, stream in enumerate(subtitle_streams):
+            codec_name = (stream.get("codec_name") or "").lower()
+            disposition = stream.get("disposition") or {}
+            stream_info = {
+                "stream_index": stream.get("index"),
+                "codec_name": stream.get("codec_name"),
+                "language": (stream.get("tags") or {}).get("language"),
+                "title": (stream.get("tags") or {}).get("title"),
+                "default": bool(disposition.get("default")),
+                "forced": bool(disposition.get("forced")),
+                "extractable": codec_name in _TEXT_SUBTITLE_CODECS,
+            }
+
+            target = _SUBTITLE_STREAM_TARGETS.get(codec_name)
+            if target is None:
+                extracted_subtitles.append(stream_info)
+                continue
+
+            output_path = os.path.join(
+                output_dir,
+                f"{task_id}-subtitle-{subtitle_order}{target['ext']}",
+            )
+
+            try:
+                (
+                    ffmpeg.input(video_path)
+                    .output(
+                        output_path,
+                        map=f"0:s:{subtitle_order}",
+                        format=target["format"],
+                        **{"c:s": target["codec"]},
+                    )
+                    .overwrite_output()
+                    .run(capture_stdout=True, capture_stderr=True, quiet=True)
+                )
+            except ffmpeg.Error as exc:
+                stderr = (
+                    exc.stderr.decode("utf-8", errors="replace")
+                    if exc.stderr
+                    else ""
+                )
+                raise RuntimeError(
+                    "Failed to extract subtitle stream "
+                    f"{stream.get('index')} from {video_path}: {stderr}"
+                ) from exc
+
+            stream_info["local_path"] = output_path
+            stream_info["file_ext"] = target["ext"]
+            extracted_subtitles.append(stream_info)
+
+        return extracted_subtitles
 
     @staticmethod
     def _build_scene_sampling_plan(
@@ -227,6 +401,8 @@ class TransNetWorker:
         local_video_path: str,
         scene_threshold: float,
         max_scene_sample_interval_seconds: float,
+        extract_audio: bool = True,
+        extract_subtitles: bool = True,
         publish_done_queue: bool = False,
     ) -> Dict[str, Any]:
         logger.info(f"[{task_id}] Processing video...")
@@ -234,9 +410,10 @@ class TransNetWorker:
             local_video_path,
             threshold=scene_threshold,
         )
+        probe_data = self._probe_media_streams(local_video_path)
 
         video_duration_seconds, fps = self._probe_video_metadata(
-            local_video_path, result.frame_count
+            probe_data, result.frame_count
         )
         scene_previews = self._build_scene_sampling_plan(
             result.scenes,
@@ -250,13 +427,79 @@ class TransNetWorker:
             scene_previews,
         )
 
+        audio_artifact = None
+        subtitle_artifacts = []
+        os.makedirs(self.config.TEMP_DIR, exist_ok=True)
+        if extract_audio:
+            try:
+                extracted_audio = self._extract_audio_stream(
+                    local_video_path, self.config.TEMP_DIR, task_id, probe_data
+                )
+                if extracted_audio is not None:
+                    local_audio_path = extracted_audio.pop("local_path")
+                    audio_key = (
+                        f"{self.config.AUDIO_PREFIX}{task_id}/"
+                        f"audio{extracted_audio.pop('file_ext')}"
+                    )
+                    try:
+                        self.s3_client.upload_file(local_audio_path, audio_key)
+                    finally:
+                        if os.path.exists(local_audio_path):
+                            os.unlink(local_audio_path)
+                    audio_artifact = {
+                        **extracted_audio,
+                        "audio_key": audio_key,
+                    }
+            except Exception as exc:
+                logger.warning(
+                    f"[{task_id}] Audio extraction skipped due to error: {exc}"
+                )
+                audio_artifact = {"error": str(exc)}
+
+        if extract_subtitles:
+            try:
+                extracted_subtitles = self._extract_subtitle_streams(
+                    local_video_path, self.config.TEMP_DIR, task_id, probe_data
+                )
+                for subtitle in extracted_subtitles:
+                    local_subtitle_path = subtitle.pop("local_path", None)
+                    file_ext = subtitle.pop("file_ext", None)
+                    if local_subtitle_path is None or file_ext is None:
+                        subtitle_artifacts.append(subtitle)
+                        continue
+
+                    subtitle_key = (
+                        f"{self.config.SUBTITLE_PREFIX}{task_id}/"
+                        f"subtitle-{subtitle['stream_index']}{file_ext}"
+                    )
+                    try:
+                        self.s3_client.upload_file(local_subtitle_path, subtitle_key)
+                    finally:
+                        if os.path.exists(local_subtitle_path):
+                            os.unlink(local_subtitle_path)
+                    subtitle_artifacts.append(
+                        {
+                            **subtitle,
+                            "subtitle_key": subtitle_key,
+                        }
+                    )
+            except Exception as exc:
+                logger.warning(
+                    f"[{task_id}] Subtitle extraction skipped due to error: {exc}"
+                )
+                subtitle_artifacts.append({"error": str(exc)})
+
         result_data = {
             "task_id": task_id,
             "s3_key": s3_key,
             "frame_count": result.frame_count,
             "fps": fps,
+            "source_container": (probe_data.get("format") or {}).get("format_name"),
+            "source_extension": os.path.splitext(s3_key)[1].lower() or None,
             "scene_threshold": scene_threshold,
             "max_scene_sample_interval_seconds": max_scene_sample_interval_seconds,
+            "audio": audio_artifact,
+            "subtitles": subtitle_artifacts,
             "scene_preview_frames": uploaded_scene_previews,
         }
 
@@ -296,6 +539,10 @@ class TransNetWorker:
             max_scene_sample_interval_seconds = float(
                 message.get("max_scene_sample_interval_seconds", 5.0)
             )
+            extract_audio = self._parse_bool(message.get("extract_audio"), True)
+            extract_subtitles = self._parse_bool(
+                message.get("extract_subtitles"), True
+            )
             if not 0 < scene_threshold < 1:
                 raise ValueError("'scene_threshold' must be between 0 and 1")
             if max_scene_sample_interval_seconds <= 0:
@@ -310,6 +557,8 @@ class TransNetWorker:
                 local_video_path,
                 scene_threshold,
                 max_scene_sample_interval_seconds,
+                extract_audio=extract_audio,
+                extract_subtitles=extract_subtitles,
                 publish_done_queue=True,
             )
 
@@ -362,6 +611,8 @@ class TransNetWorker:
         max_scene_sample_interval_seconds = float(
             message.get("max_scene_sample_interval_seconds", 5.0)
         )
+        extract_audio = self._parse_bool(message.get("extract_audio"), True)
+        extract_subtitles = self._parse_bool(message.get("extract_subtitles"), True)
         if not 0 < scene_threshold < 1:
             raise ValueError("'scene_threshold' must be between 0 and 1")
         if max_scene_sample_interval_seconds <= 0:
@@ -378,6 +629,8 @@ class TransNetWorker:
                 local_video_path,
                 scene_threshold,
                 max_scene_sample_interval_seconds,
+                extract_audio=extract_audio,
+                extract_subtitles=extract_subtitles,
             )
 
         finally:

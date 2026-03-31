@@ -30,5 +30,7 @@ ENV USE_GPU=false
 ENV WEIGHTS_PATH=/app/weights/transnetv2-pytorch-weights.pth
 ENV RESULT_PREFIX=results/
 ENV FRAME_IMAGE_PREFIX=frames/
+ENV AUDIO_PREFIX=audio/
+ENV SUBTITLE_PREFIX=subtitles/
 
 ENTRYPOINT ["python", "main.py"]
