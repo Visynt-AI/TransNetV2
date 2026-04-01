@@ -24,6 +24,7 @@ class TransNetPredictor:
 
     _model: Optional[nn.Module] = None
     _device: Optional[str] = None
+    _weights_path: Optional[str] = None
 
     def __new__(cls, *args, **kwargs):
         if cls._instance is None:
@@ -32,8 +33,14 @@ class TransNetPredictor:
 
     def __init__(self, weights_path: str, device: str = "cpu"):
         if self.__class__._model is not None:
-            self.weights_path = weights_path
-            self.device = device
+            if weights_path != self.__class__._weights_path or device != self.__class__._device:
+                raise RuntimeError(
+                    f"TransNetPredictor already initialized with "
+                    f"weights_path={self.__class__._weights_path!r}, device={self.__class__._device!r}. "
+                    f"Cannot reinitialize with different parameters."
+                )
+            self.weights_path = self.__class__._weights_path
+            self.device = self.__class__._device
             return
 
         self.weights_path = weights_path
@@ -52,6 +59,9 @@ class TransNetPredictor:
         self._model.load_state_dict(state_dict)
         self._model.eval()
         self._model.to(self.device)
+
+        self.__class__._weights_path = self.weights_path
+        self.__class__._device = self.device
 
         logger.info("Model loaded successfully")
 
@@ -107,9 +117,13 @@ class TransNetPredictor:
                 single_frame_pred = (
                     torch.sigmoid(single_frame_pred).cpu().numpy()[0, 25:75, 0]
                 )
-                all_frame_pred = (
-                    torch.sigmoid(all_frame_pred["many_hot"]).cpu().numpy()[0, 25:75, 0]
-                )
+                many_hot = all_frame_pred.get("many_hot") if isinstance(all_frame_pred, dict) else None
+                if many_hot is None:
+                    raise RuntimeError(
+                        "Model output missing 'many_hot' key; got keys: "
+                        f"{list(all_frame_pred.keys()) if isinstance(all_frame_pred, dict) else type(all_frame_pred)}"
+                    )
+                all_frame_pred = torch.sigmoid(many_hot).cpu().numpy()[0, 25:75, 0]
 
                 predictions_single.append(single_frame_pred)
                 predictions_all.append(all_frame_pred)

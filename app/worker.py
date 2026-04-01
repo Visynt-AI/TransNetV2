@@ -346,26 +346,22 @@ class TransNetWorker:
                     )
                     upload_jobs.append((frame_id, local_frame_path, frame_key))
 
-            max_workers = 10
-            if max_workers > 0:
-                with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    future_map = {
-                        executor.submit(
-                            _upload_preview_frame,
-                            config_data,
-                            local_frame_path,
-                            frame_key,
-                        ): (frame_id, frame_key)
-                        for frame_id, local_frame_path, frame_key in upload_jobs
-                    }
-                    uploaded_frame_keys = {
-                        future_map[future][0]: future_map[future][1]
-                        for future in future_map
-                    }
-                    for future in future_map:
-                        future.result()
-            else:
-                uploaded_frame_keys = {}
+            with ThreadPoolExecutor(max_workers=10) as executor:
+                future_map = {
+                    executor.submit(
+                        _upload_preview_frame,
+                        config_data,
+                        local_frame_path,
+                        frame_key,
+                    ): (frame_id, frame_key)
+                    for frame_id, local_frame_path, frame_key in upload_jobs
+                }
+                uploaded_frame_keys = {
+                    future_map[future][0]: future_map[future][1]
+                    for future in future_map
+                }
+                for future in future_map:
+                    future.result()  # raises on upload failure
 
             for scene_preview in scene_previews:
                 uploaded_frames = []
@@ -452,10 +448,7 @@ class TransNetWorker:
                         "audio_key": audio_key,
                     }
             except Exception as exc:
-                logger.warning(
-                    f"[{task_id}] Audio extraction skipped due to error: {exc}"
-                )
-                audio_artifact = {"error": str(exc)}
+                logger.warning(f"[{task_id}] Audio extraction skipped: {exc}")
 
         if extract_subtitles:
             try:
@@ -485,10 +478,7 @@ class TransNetWorker:
                         }
                     )
             except Exception as exc:
-                logger.warning(
-                    f"[{task_id}] Subtitle extraction skipped due to error: {exc}"
-                )
-                subtitle_artifacts.append({"error": str(exc)})
+                logger.warning(f"[{task_id}] Subtitle extraction skipped: {exc}")
 
         result_data = {
             "task_id": task_id,
@@ -603,7 +593,7 @@ class TransNetWorker:
                 )
                 logger.info("Press CTRL+C to exit")
 
-                retry_delay = 5  # 连接成功后重置退避时间
+                retry_delay = 5  # reset backoff on successful connection
                 self.channel.start_consuming()
 
             except KeyboardInterrupt:
