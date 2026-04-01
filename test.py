@@ -1,9 +1,13 @@
 import json
+import os
+
 import pika
+from dotenv import load_dotenv
 
+load_dotenv()
 
-RABBITMQ_URL = "amqp://visynt_send:123456@localhost:5672/visynt"
-QUEUE_NAME = "transnet_tasks"
+RABBITMQ_URL = os.getenv("RABBITMQ_URL", "amqp://guest:guest@localhost:5672/")
+QUEUE_NAME = os.getenv("QUEUE_NAME", "transnet_tasks")
 
 MESSAGE = {
     "task_id": "f62e65f4-7f8d-4d54-bef2-6d3e4b2c4f912",

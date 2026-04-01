@@ -74,13 +74,3 @@ class S3Client:
         except ClientError as e:
             raise RuntimeError(f"Failed to upload bytes to S3: {e}")
 
-    def upload_json(self, data: dict, s3_key: str) -> str:
-        import json
-
-        json_bytes = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
-        return self.upload_bytes(json_bytes, s3_key, content_type="application/json")
-
-    def delete_file(self, local_path: str):
-        if os.path.exists(local_path):
-            os.unlink(local_path)
-            logger.debug(f"Deleted local file: {local_path}")

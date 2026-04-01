@@ -1,8 +1,45 @@
+import random
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as functional
 
-import random
+
+def _sliding_window_gather(
+    similarities: torch.Tensor, lookup_window: int
+) -> torch.Tensor:
+    """Gather a fixed-size local window of similarity scores for each time step.
+
+    Args:
+        similarities: [batch, time, time] similarity matrix.
+        lookup_window: odd integer; size of the neighbourhood to gather.
+
+    Returns:
+        Tensor of shape [batch, time, lookup_window].
+    """
+    batch_size, time_window = similarities.shape[0], similarities.shape[1]
+    device = similarities.device
+    pad = (lookup_window - 1) // 2
+
+    similarities_padded = functional.pad(similarities, [pad, pad])
+
+    batch_indices = (
+        torch.arange(batch_size, device=device)
+        .view(batch_size, 1, 1)
+        .expand(batch_size, time_window, lookup_window)
+    )
+    time_indices = (
+        torch.arange(time_window, device=device)
+        .view(1, time_window, 1)
+        .expand(batch_size, time_window, lookup_window)
+    )
+    lookup_indices = (
+        torch.arange(lookup_window, device=device)
+        .view(1, 1, lookup_window)
+        .expand(batch_size, time_window, lookup_window)
+    ) + time_indices
+
+    return similarities_padded[batch_indices, time_indices, lookup_indices]
 
 
 class TransNetV2(nn.Module):
@@ -103,9 +140,6 @@ class StackedDDCNNV2(nn.Module):
             raise NotImplemented("Octave convolution not implemented in Pytorch version of Transnet!")
 
         assert pool_type == "max" or pool_type == "avg"
-        if use_octave_conv and pool_type == "max":
-            print("WARN: Octave convolution was designed with average pooling, not max pooling.")
-
         self.shortcut = shortcut
         self.DDCNN = nn.ModuleList([
             DilatedDCNNV2(in_filters if i == 1 else filters * 4, filters, octave_conv=use_octave_conv,
@@ -246,18 +280,8 @@ class FrameSimilarity(nn.Module):
         x = self.projection(x)
         x = functional.normalize(x, p=2, dim=2)
 
-        batch_size, time_window = x.shape[0], x.shape[1]
-        similarities = torch.bmm(x, x.transpose(1, 2))  # [batch_size, time_window, time_window]
-        similarities_padded = functional.pad(similarities, [(self.lookup_window - 1) // 2, (self.lookup_window - 1) // 2])
-
-        batch_indices = torch.arange(0, batch_size, device=x.device).view([batch_size, 1, 1]).repeat(
-            [1, time_window, self.lookup_window])
-        time_indices = torch.arange(0, time_window, device=x.device).view([1, time_window, 1]).repeat(
-            [batch_size, 1, self.lookup_window])
-        lookup_indices = torch.arange(0, self.lookup_window, device=x.device).view([1, 1, self.lookup_window]).repeat(
-            [batch_size, time_window, 1]) + time_indices
-
-        similarities = similarities_padded[batch_indices, time_indices, lookup_indices]
+        similarities = torch.bmm(x, x.transpose(1, 2))  # [batch, time, time]
+        similarities = _sliding_window_gather(similarities, self.lookup_window)
         return functional.relu(self.fc(similarities))
 
 
@@ -300,18 +324,8 @@ class ColorHistograms(nn.Module):
     def forward(self, inputs):
         x = self.compute_color_histograms(inputs)
 
-        batch_size, time_window = x.shape[0], x.shape[1]
-        similarities = torch.bmm(x, x.transpose(1, 2))  # [batch_size, time_window, time_window]
-        similarities_padded = functional.pad(similarities, [(self.lookup_window - 1) // 2, (self.lookup_window - 1) // 2])
-
-        batch_indices = torch.arange(0, batch_size, device=x.device).view([batch_size, 1, 1]).repeat(
-            [1, time_window, self.lookup_window])
-        time_indices = torch.arange(0, time_window, device=x.device).view([1, time_window, 1]).repeat(
-            [batch_size, 1, self.lookup_window])
-        lookup_indices = torch.arange(0, self.lookup_window, device=x.device).view([1, 1, self.lookup_window]).repeat(
-            [batch_size, time_window, 1]) + time_indices
-
-        similarities = similarities_padded[batch_indices, time_indices, lookup_indices]
+        similarities = torch.bmm(x, x.transpose(1, 2))  # [batch, time, time]
+        similarities = _sliding_window_gather(similarities, self.lookup_window)
 
         if self.fc is not None:
             return functional.relu(self.fc(similarities))

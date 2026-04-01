@@ -1,6 +1,6 @@
 import os
 from dataclasses import dataclass
-from typing import Optional
+from typing import List, Optional
 
 from dotenv import load_dotenv
 
@@ -73,6 +73,25 @@ class Config:
             ),
             TEMP_DIR=os.getenv("TEMP_DIR", "./.tmp"),
         )
+
+    def validate(self) -> None:
+        """Raise ValueError / FileNotFoundError for missing required config."""
+        missing: List[str] = []
+        if not self.S3_ACCESS_KEY:
+            missing.append("S3_ACCESS_KEY")
+        if not self.S3_SECRET_KEY:
+            missing.append("S3_SECRET_KEY")
+        if not self.S3_BUCKET:
+            missing.append("S3_BUCKET")
+        if missing:
+            raise ValueError(
+                f"Missing required environment variables: {', '.join(missing)}"
+            )
+        if not os.path.exists(self.WEIGHTS_PATH):
+            raise FileNotFoundError(
+                f"Weights file not found: {self.WEIGHTS_PATH}. "
+                "Please download the weights file and place it in the weights/ directory."
+            )
 
     def get_device(self) -> str:
         import torch

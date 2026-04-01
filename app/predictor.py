@@ -8,9 +8,20 @@ from typing import List, Optional, Tuple
 import numpy as np
 import torch
 import torch.nn as nn
-from PIL import Image
 
 logger = logging.getLogger(__name__)
+
+# Model input resolution (H x W) — must match trained weights
+_FRAME_WIDTH = 48
+_FRAME_HEIGHT = 27
+
+# Sliding-window inference parameters — must match model architecture
+_MODEL_WINDOW_SIZE = 100   # frames fed to model per pass
+_MODEL_WINDOW_STRIDE = 50  # step between windows
+_MODEL_WINDOW_PADDING = 25  # frames padded at each end
+
+# Frame image extraction batch size (ffmpeg select filter limit)
+_FRAME_EXTRACT_BATCH_SIZE = 64
 
 
 @dataclass
@@ -70,27 +81,29 @@ class TransNetPredictor:
 
         logger.info(f"Extracting frames from {video_path}")
 
-        # probe = ffmpeg.probe(video_path)
-        # video_info = next(s for s in probe["streams"] if s["codec_type"] == "video")
-        # width = int(video_info["width"])
-        # height = int(video_info["height"])
-
         out, _ = (
             ffmpeg.input(video_path)
-            .output("pipe:", format="rawvideo", pix_fmt="rgb24", s="48x27")
+            .output(
+                "pipe:",
+                format="rawvideo",
+                pix_fmt="rgb24",
+                s=f"{_FRAME_WIDTH}x{_FRAME_HEIGHT}",
+            )
             .run(capture_stdout=True, capture_stderr=True, quiet=True)
         )
 
-        frames = np.frombuffer(out, np.uint8).reshape([-1, 27, 48, 3])
+        frames = np.frombuffer(out, np.uint8).reshape([-1, _FRAME_HEIGHT, _FRAME_WIDTH, 3])
         logger.info(f"Extracted {len(frames)} frames")
         return frames
 
     def predict_frames(
-        self, frames: np.ndarray, batch_size: int = 1
+        self, frames: np.ndarray
     ) -> Tuple[np.ndarray, np.ndarray]:
-        no_padded_frames_start = 25
+        no_padded_frames_start = _MODEL_WINDOW_PADDING
         no_padded_frames_end = (
-            25 + 50 - (len(frames) % 50 if len(frames) % 50 != 0 else 50)
+            _MODEL_WINDOW_PADDING
+            + _MODEL_WINDOW_STRIDE
+            - (len(frames) % _MODEL_WINDOW_STRIDE if len(frames) % _MODEL_WINDOW_STRIDE != 0 else _MODEL_WINDOW_STRIDE)
         )
 
         start_frame = np.expand_dims(frames[0], 0)
@@ -109,13 +122,15 @@ class TransNetPredictor:
 
         with torch.inference_mode():
             ptr = 0
-            while ptr + 100 <= len(padded_inputs):
-                input_tensor = all_tensor[:, ptr : ptr + 100]
+            while ptr + _MODEL_WINDOW_SIZE <= len(padded_inputs):
+                input_tensor = all_tensor[:, ptr : ptr + _MODEL_WINDOW_SIZE]
 
                 single_frame_pred, all_frame_pred = self._model(input_tensor)
 
                 single_frame_pred = (
-                    torch.sigmoid(single_frame_pred).cpu().numpy()[0, 25:75, 0]
+                    torch.sigmoid(single_frame_pred)
+                    .cpu()
+                    .numpy()[0, _MODEL_WINDOW_PADDING : _MODEL_WINDOW_PADDING + _MODEL_WINDOW_STRIDE, 0]
                 )
                 many_hot = all_frame_pred.get("many_hot") if isinstance(all_frame_pred, dict) else None
                 if many_hot is None:
@@ -123,12 +138,16 @@ class TransNetPredictor:
                         "Model output missing 'many_hot' key; got keys: "
                         f"{list(all_frame_pred.keys()) if isinstance(all_frame_pred, dict) else type(all_frame_pred)}"
                     )
-                all_frame_pred = torch.sigmoid(many_hot).cpu().numpy()[0, 25:75, 0]
+                all_frame_pred = (
+                    torch.sigmoid(many_hot)
+                    .cpu()
+                    .numpy()[0, _MODEL_WINDOW_PADDING : _MODEL_WINDOW_PADDING + _MODEL_WINDOW_STRIDE, 0]
+                )
 
                 predictions_single.append(single_frame_pred)
                 predictions_all.append(all_frame_pred)
 
-                ptr += 50
+                ptr += _MODEL_WINDOW_STRIDE
 
         single_frame_predictions = np.concatenate(predictions_single)[: len(frames)]
         all_frame_predictions = np.concatenate(predictions_all)[: len(frames)]
@@ -162,90 +181,17 @@ class TransNetPredictor:
 
         return np.array(scenes, dtype=np.int32)
 
-    def visualize_predictions(
-        self,
-        frames: np.ndarray,
-        single_frame_predictions: np.ndarray,
-        all_frame_predictions: np.ndarray,
-    ) -> Image.Image:
-        from PIL import Image, ImageDraw
-
-        predictions = [single_frame_predictions, all_frame_predictions]
-
-        ih, iw, ic = frames.shape[1:]
-        width = 25
-
-        pad_with = width - len(frames) % width if len(frames) % width != 0 else 0
-        frames_padded = np.pad(
-            frames, [(0, pad_with), (0, 1), (0, len(predictions)), (0, 0)]
-        )
-
-        predictions_padded = [np.pad(x, (0, pad_with)) for x in predictions]
-        height = len(frames_padded) // width
-
-        img = frames_padded.reshape([height, width, ih + 1, iw + len(predictions), ic])
-        img = np.concatenate(
-            np.split(np.concatenate(np.split(img, height), axis=2)[0], width), axis=2
-        )[0, :-1]
-
-        img = Image.fromarray(img)
-        draw = ImageDraw.Draw(img)
-
-        for i, pred in enumerate(zip(*predictions_padded)):
-            x, y = i % width, i // width
-            x, y = x * (iw + len(predictions)) + iw, y * (ih + 1) + ih - 1
-
-            for j, p in enumerate(pred):
-                color = [0, 0, 0]
-                color[(j + 1) % 3] = 255
-
-                value = round(p * (ih - 1))
-                if value != 0:
-                    draw.line((x + j, y, x + j, y - value), fill=tuple(color), width=1)
-
-        return img
-
     def predict_video(
         self, video_path: str, threshold: float = 0.5
     ) -> PredictionResult:
         frames = self.extract_frames(video_path)
-        single_frame_pred, all_frame_pred = self.predict_frames(frames)
+        single_frame_pred, _ = self.predict_frames(frames)
         scenes = self.predictions_to_scenes(single_frame_pred, threshold=threshold)
 
         return PredictionResult(
             scenes=scenes.tolist(),
             frame_count=len(frames),
         )
-
-    def predict_video_with_visualization(
-        self, video_path: str, threshold: float = 0.5
-    ) -> Tuple[PredictionResult, Image.Image]:
-        frames = self.extract_frames(video_path)
-        single_frame_pred, all_frame_pred = self.predict_frames(frames)
-        scenes = self.predictions_to_scenes(single_frame_pred, threshold=threshold)
-
-        visualization = self.visualize_predictions(
-            frames, single_frame_pred, all_frame_pred
-        )
-
-        result = PredictionResult(
-            scenes=scenes.tolist(),
-            frame_count=len(frames),
-        )
-
-        return result, visualization
-
-    def extract_frame_image(
-        self, video_path: str, frame_index: int, output_path: str
-    ) -> None:
-        extracted_frames = self.extract_frame_images(
-            video_path, [frame_index], os.path.dirname(output_path)
-        )
-        extracted_path = extracted_frames.get(frame_index)
-        if extracted_path is None:
-            raise RuntimeError(f"Failed to extract frame {frame_index} from {video_path}")
-        if extracted_path != output_path:
-            os.replace(extracted_path, output_path)
 
     def extract_frame_images(
         self, video_path: str, frame_indices: List[int], output_dir: str
@@ -257,13 +203,12 @@ class TransNetPredictor:
             return {}
 
         os.makedirs(output_dir, exist_ok=True)
-        max_frames_per_batch = 64
         extracted_frames: dict[int, str] = {}
         extraction_id = uuid.uuid4().hex
 
-        for batch_start in range(0, len(unique_frame_indices), max_frames_per_batch):
+        for batch_start in range(0, len(unique_frame_indices), _FRAME_EXTRACT_BATCH_SIZE):
             batch_indices = unique_frame_indices[
-                batch_start : batch_start + max_frames_per_batch
+                batch_start : batch_start + _FRAME_EXTRACT_BATCH_SIZE
             ]
             batch_prefix = f"frame-{extraction_id}-{batch_start:06d}"
             output_pattern = os.path.join(output_dir, f"{batch_prefix}-%06d.png")
