@@ -2,6 +2,7 @@ import json
 import logging
 import math
 import os
+import time
 import uuid
 from fractions import Fraction
 from concurrent.futures import ThreadPoolExecutor
@@ -582,24 +583,57 @@ class TransNetWorker:
                 os.unlink(local_video_path)
 
     def start(self):
-        self.connect()
+        retry_delay = 5
+        max_retry_delay = 60
 
-        if self.channel is None:
-            raise OSError("Channel is None")
+        while True:
+            try:
+                self.connect()
 
-        self.channel.basic_consume(
-            queue=self.config.QUEUE_NAME, on_message_callback=self.process_message
-        )
+                if self.channel is None:
+                    raise OSError("Channel is None")
 
-        logger.info(f"Waiting for messages on queue '{self.config.QUEUE_NAME}'...")
-        logger.info("Press CTRL+C to exit")
+                self.channel.basic_consume(
+                    queue=self.config.QUEUE_NAME,
+                    on_message_callback=self.process_message,
+                )
 
-        try:
-            self.channel.start_consuming()
-        except KeyboardInterrupt:
-            logger.info("Received interrupt signal, shutting down...")
-        finally:
-            self.disconnect()
+                logger.info(
+                    f"Waiting for messages on queue '{self.config.QUEUE_NAME}'..."
+                )
+                logger.info("Press CTRL+C to exit")
+
+                retry_delay = 5  # 连接成功后重置退避时间
+                self.channel.start_consuming()
+
+            except KeyboardInterrupt:
+                logger.info("Received interrupt signal, shutting down...")
+                self.disconnect()
+                break
+
+            except (
+                pika.exceptions.AMQPConnectionError,
+                pika.exceptions.AMQPChannelError,
+                pika.exceptions.StreamLostError,
+                pika.exceptions.ConnectionClosedByBroker,
+                pika.exceptions.ConnectionWrongStateError,
+                OSError,
+            ) as e:
+                logger.warning(
+                    f"RabbitMQ connection lost: {e}. "
+                    f"Reconnecting in {retry_delay}s..."
+                )
+                self.disconnect()
+                time.sleep(retry_delay)
+                retry_delay = min(retry_delay * 2, max_retry_delay)
+
+            except Exception as e:
+                logger.exception(
+                    f"Unexpected error: {e}. Reconnecting in {retry_delay}s..."
+                )
+                self.disconnect()
+                time.sleep(retry_delay)
+                retry_delay = min(retry_delay * 2, max_retry_delay)
 
     def run_once(self, message: Dict[str, Any]) -> Dict[str, Any]:
         task_id = message.get("task_id", str(uuid.uuid4()))
